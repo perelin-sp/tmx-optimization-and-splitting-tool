@@ -62,17 +62,6 @@ I am not a professional software developer.
 
 The initial code and later iterations of this utility were generated and refined with the help of ChatGPT, then manually tested on local TMX files. Please review the source code before using it in sensitive workflows.
 
-## Support
-
-TOST is free.
-
-If the app was useful to you, you can voluntarily support its development:
-
-* Ko-fi: https://ko-fi.com/YOUR_KOFI_NAME
-* Liberapay: https://liberapay.com/YOUR_LIBERAPAY_NAME
-* Boosty: https://boosty.to/YOUR_BOOSTY_NAME
-
-Support is not a license purchase, does not unlock additional features, and does not affect access to the app.
 
 ## License
 
