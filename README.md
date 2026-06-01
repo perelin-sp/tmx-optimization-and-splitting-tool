@@ -33,7 +33,7 @@ TMX files are processed on your computer and are not uploaded anywhere by the ap
 Download the latest Windows build from GitHub Releases:
 
 ```text
-https://github.com/YOUR_GITHUB_USERNAME/tmx-optimization-and-splitting-tool/releases/latest
+https://github.com/perelin-sp/tmx-optimization-and-splitting-tool/releases/latest
 ```
 
 ## Build from source
