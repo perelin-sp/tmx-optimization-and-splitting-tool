@@ -9,10 +9,10 @@ import threading
 import time
 import tempfile
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from xml.etree import ElementTree as ET
 
-APP_TITLE = "TMX Optimization and Splitting Tool v4.0.1"
+APP_TITLE = "TMX Optimization and Splitting Tool v4.5.7"
 APP_SHORT_NAME = "TOST"
 DEFAULT_MAX_MB = "250"
 DEFAULT_PART_TU_COUNT = "50000"
@@ -39,7 +39,7 @@ def resource_path(relative_path):
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path)
 
 def apply_window_icon(root):
-    icon_path = resource_path("tmx_splitter.ico")
+    icon_path = resource_path("tost.ico")
     if os.path.exists(icon_path):
         try:
             root.iconbitmap(icon_path)
@@ -457,6 +457,22 @@ def is_noisy_segment(text, noisy_set):
     return text in noisy_set
 
 
+def noisy_list_pair_matches(source_text, target_text, noisy_set, match_mode):
+    source_is_noisy = is_noisy_segment(source_text, noisy_set)
+    target_is_noisy = is_noisy_segment(target_text, noisy_set)
+    if match_mode == "Either source or target":
+        return bool(source_is_noisy or target_is_noisy)
+    return bool(source_is_noisy and target_is_noisy)
+
+
+def is_short_length_pair(source_text, target_text, threshold):
+    source_text = normalize_pair_text(source_text)
+    target_text = normalize_pair_text(target_text)
+    if not source_text or not target_text or threshold <= 0:
+        return False
+    return len(source_text) <= threshold and len(target_text) <= threshold
+
+
 def get_source_target_texts(tuvs, source_langs, target_langs):
     return (
         normalize_pair_text(select_text_for_langs(tuvs, source_langs)),
@@ -834,6 +850,11 @@ class TmxSplitterApp:
         self.last_inline_tag_warnings = []
         self.last_changed_tus = []
         self.result_summary = tk.StringVar(value="Result summary: no analysis or optimization has been run yet.")
+        self.compare_files_a = []
+        self.compare_files_b = []
+        self.compare_files_a_label = tk.StringVar(value="No TMX files selected")
+        self.compare_files_b_label = tk.StringVar(value="No TMX files selected")
+        self.compare_recursive = tk.BooleanVar(value=False)
 
         self.output_dir = tk.StringVar(value=os.path.abspath("output"))
         self.max_mb = tk.StringVar(value=DEFAULT_MAX_MB)
@@ -858,6 +879,9 @@ class TmxSplitterApp:
         self.opt_remove_noisy = tk.BooleanVar(value=False)
         self.opt_remove_one_char_punct = tk.BooleanVar(value=False)
         self.opt_noisy_segments = tk.StringVar(value="-, :, ;, ., •, *, +, %")
+        self.opt_noisy_match_mode = tk.StringVar(value="Both source and target")
+        self.opt_warn_min_length = tk.BooleanVar(value=False)
+        self.opt_min_text_length = tk.StringVar(value="2")
 
         # Optimize TMX v3.2.4 options: inline tag mismatch checks and optional stripping.
         self.opt_report_inline_tag_mismatch = tk.BooleanVar(value=True)
@@ -882,6 +906,8 @@ class TmxSplitterApp:
             "Smartcat-oriented": "CAT import-oriented profile using Smartcat as a practical reference. Keeps only the selected source-target pair, normalizes language codes to the user-defined values, removes missing/empty/tag-only TU, exact duplicates, configured noisy pairs and one-character/punctuation-only pairs, and reports inline-tag mismatch.",
             "Custom": "Manual profile. Keeps the current checkbox settings unchanged so you can tune cleanup rules yourself.",
         }
+        self.builtin_profile_values = ("General CAT-safe", "Strict import", "Smartcat-oriented", "Custom")
+        self.user_profiles = {}
 
         self.load_settings()
         self.build_ui()
@@ -900,7 +926,42 @@ class TmxSplitterApp:
         ttk.Button(buttons, text="Add TMX files...", command=self.add_files).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Remove selected", command=self.remove_selected).pack(side=tk.LEFT, padx=6)
         ttk.Button(buttons, text="Clear", command=self.clear_files).pack(side=tk.LEFT)
-        ttk.Button(buttons, text="Settings / About", command=self.show_settings_about).pack(side=tk.RIGHT)
+
+        self.settings_icon = None
+        for icon_name in ("settings_icon.png", "settings_icon.png"):
+            settings_icon_path = resource_path(icon_name)
+            try:
+                if os.path.exists(settings_icon_path):
+                    self.settings_icon = tk.PhotoImage(file=settings_icon_path)
+                    break
+            except Exception:
+                self.settings_icon = None
+
+        self.help_icon = None
+        for icon_name in ("help_icon.png", "help_icon.png"):
+            help_icon_path = resource_path(icon_name)
+            try:
+                if os.path.exists(help_icon_path):
+                    self.help_icon = tk.PhotoImage(file=help_icon_path)
+                    break
+            except Exception:
+                self.help_icon = None
+
+        # Pack from right to left: Help is rightmost, Settings is to its left.
+        # Both icons use the 24 px variants first so the buttons have the same visual size.
+        if self.help_icon:
+            help_button = ttk.Button(buttons, image=self.help_icon, command=self.show_help, width=3)
+            help_button.pack(side=tk.RIGHT)
+            ToolTip(help_button, "Help")
+        else:
+            ttk.Button(buttons, text="Help", command=self.show_help).pack(side=tk.RIGHT)
+
+        if self.settings_icon:
+            settings_button = ttk.Button(buttons, image=self.settings_icon, command=self.show_settings_about, width=3)
+            settings_button.pack(side=tk.RIGHT, padx=(0, 6))
+            ToolTip(settings_button, "Settings / About")
+        else:
+            ttk.Button(buttons, text="Settings / About", command=self.show_settings_about).pack(side=tk.RIGHT, padx=(0, 6))
 
         self.file_list = tk.Listbox(file_frame, height=3, selectmode=tk.EXTENDED)
         self.file_list.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
@@ -977,6 +1038,7 @@ class TmxSplitterApp:
         ttk.Button(split_actions, text="Open output folder", command=self.open_output_folder).pack(side=tk.LEFT, padx=6)
         ttk.Button(split_actions, text="Open report", command=self.open_last_report).pack(side=tk.LEFT)
         ttk.Button(split_actions, text="View problem TUs", command=self.view_problem_tus).pack(side=tk.LEFT, padx=6)
+        ttk.Button(split_actions, text="Export problem TUs", command=lambda: self.export_result_groups_dialog(default_groups=("Problem TUs",))).pack(side=tk.LEFT)
 
         split_tab.columnconfigure(1, weight=1)
 
@@ -989,26 +1051,24 @@ class TmxSplitterApp:
         opt_lang_box = ttk.LabelFrame(optimize_tab, text="Profile and language pair", padding=3)
         opt_lang_box.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 2))
         ttk.Label(opt_lang_box, text="Optimization profile:").grid(row=0, column=0, sticky="w")
-        profile_button = ttk.Menubutton(opt_lang_box, textvariable=self.opt_profile, width=24)
-        profile_button.grid(row=0, column=1, sticky="w", padx=6)
+        profile_row = ttk.Frame(opt_lang_box)
+        profile_row.grid(row=0, column=1, columnspan=2, sticky="w", padx=6)
+        profile_button = ttk.Menubutton(profile_row, textvariable=self.opt_profile, width=24)
+        profile_button.pack(side="left")
         profile_menu = tk.Menu(profile_button, tearoff=False)
-        self.profile_values = ("General CAT-safe", "Strict import", "Smartcat-oriented", "Custom")
-        for profile_name in self.profile_values:
-            profile_menu.add_radiobutton(
-                label=profile_name,
-                variable=self.opt_profile,
-                value=profile_name,
-                command=self.hide_profile_menu_tooltip,
-            )
         profile_button["menu"] = profile_menu
         self.profile_button = profile_button
         self.profile_menu = profile_menu
+        self.rebuild_profile_menu()
         self.profile_menu_tooltip = MenuItemToolTip(
             profile_menu,
             text_func=self.get_profile_description,
             delay_ms=2000,
         )
-        ttk.Button(opt_lang_box, text="Apply profile", command=self.apply_optimization_profile).grid(row=0, column=2, sticky="w")
+        ttk.Button(profile_row, text="Apply profile", command=self.apply_optimization_profile).pack(side="left", padx=(6, 0))
+        ttk.Button(profile_row, text="Save as preset", command=self.save_current_optimization_preset).pack(side="left", padx=(6, 0))
+        ttk.Button(profile_row, text="Delete preset", command=self.delete_selected_optimization_preset).pack(side="left", padx=(6, 0))
+        ttk.Button(profile_row, text="Import presets", command=self.import_optimization_presets).pack(side="left", padx=(6, 0))
         ttk.Label(opt_lang_box, text="Source langs:").grid(row=1, column=0, sticky="w", pady=(1, 0))
         ttk.Entry(opt_lang_box, textvariable=self.source_langs).grid(row=1, column=1, sticky="ew", padx=6, pady=(1, 0))
         ttk.Label(opt_lang_box, text="Target langs:").grid(row=2, column=0, sticky="w", pady=(1, 0))
@@ -1080,6 +1140,24 @@ class TmxSplitterApp:
         noisy_line.grid(row=4, column=0, sticky="ew", pady=(2, 0))
         ttk.Label(noisy_line, text="Noisy segment list:").pack(side=tk.LEFT)
         ttk.Entry(noisy_line, textvariable=self.opt_noisy_segments, width=55).pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+
+        noisy_rules_line = ttk.Frame(dedupe_box)
+        noisy_rules_line.grid(row=5, column=0, sticky="ew", pady=(2, 0))
+        ttk.Label(noisy_rules_line, text="List match:").pack(side=tk.LEFT)
+        ttk.Combobox(
+            noisy_rules_line,
+            textvariable=self.opt_noisy_match_mode,
+            values=("Both source and target", "Either source or target"),
+            state="readonly",
+            width=24,
+        ).pack(side=tk.LEFT, padx=(6, 14))
+        ttk.Checkbutton(
+            noisy_rules_line,
+            text="Warn if both texts are <=",
+            variable=self.opt_warn_min_length,
+        ).pack(side=tk.LEFT)
+        ttk.Entry(noisy_rules_line, textvariable=self.opt_min_text_length, width=4).pack(side=tk.LEFT, padx=4)
+        ttk.Label(noisy_rules_line, text="chars").pack(side=tk.LEFT)
         dedupe_box.columnconfigure(0, weight=1)
 
         inline_box = ttk.LabelFrame(optimize_tab, text="Inline tags", padding=3)
@@ -1116,9 +1194,51 @@ class TmxSplitterApp:
         ttk.Button(opt_view_actions, text="View noisy warnings", command=self.view_noisy_warnings).pack(side=tk.LEFT)
         ttk.Button(opt_view_actions, text="View inline-tag warnings", command=self.view_inline_tag_warnings).pack(side=tk.LEFT, padx=6)
         ttk.Button(opt_view_actions, text="View changed TUs", command=self.view_changed_tus).pack(side=tk.LEFT)
+        ttk.Button(opt_view_actions, text="Export result groups", command=self.export_result_groups_dialog).pack(side=tk.LEFT, padx=6)
 
         optimize_tab.columnconfigure(0, weight=1)
         optimize_tab.columnconfigure(1, weight=1)
+
+        # ------------------------------------------------------------------
+        # Tab 3: Compare TMX
+        # ------------------------------------------------------------------
+        compare_tab = ttk.Frame(self.notebook, padding=6)
+        self.notebook.add(compare_tab, text="Compare TMX")
+
+        ttk.Label(
+            compare_tab,
+            text="Compare two TMX files or two sets of TMX files using the current Source langs and Target langs settings. This is useful for comparing an original TMX with an optimized TMX, two exports, or two versions of the same base.",
+            wraplength=900,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+
+        files_a_box = ttk.LabelFrame(compare_tab, padding=5)
+        files_a_box.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        ttk.Label(files_a_box, text="TMX A:").grid(row=0, column=0, sticky="w")
+        ttk.Label(files_a_box, textvariable=self.compare_files_a_label).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(files_a_box, text="Select TMX...", command=self.choose_compare_files_a).grid(row=0, column=2)
+        ttk.Button(files_a_box, text="Clear", command=self.clear_compare_files_a).grid(row=0, column=3, padx=(6, 0))
+        files_a_box.columnconfigure(1, weight=1)
+
+        files_b_box = ttk.LabelFrame(compare_tab, padding=5)
+        files_b_box.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        ttk.Label(files_b_box, text="TMX B:").grid(row=0, column=0, sticky="w")
+        ttk.Label(files_b_box, textvariable=self.compare_files_b_label).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(files_b_box, text="Select TMX...", command=self.choose_compare_files_b).grid(row=0, column=2)
+        ttk.Button(files_b_box, text="Clear", command=self.clear_compare_files_b).grid(row=0, column=3, padx=(6, 0))
+        files_b_box.columnconfigure(1, weight=1)
+
+        compare_options = ttk.LabelFrame(compare_tab, text="Compare options", padding=5)
+        compare_options.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(0, 4))
+        ttk.Label(compare_options, text="If one TMX is selected on each side, files are compared directly even if their file names differ. If multiple TMX files are selected, matching uses file name.", foreground="#555555", wraplength=900).grid(row=0, column=0, sticky="w")
+
+        compare_actions = ttk.Frame(compare_tab)
+        compare_actions.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.compare_btn = ttk.Button(compare_actions, text="Compare TMX", command=self.start_compare)
+        self.compare_btn.pack(side=tk.LEFT)
+        ttk.Button(compare_actions, text="Open report", command=self.open_last_report).pack(side=tk.LEFT, padx=6)
+        ttk.Button(compare_actions, text="Open output folder", command=self.open_output_folder).pack(side=tk.LEFT)
+
+        compare_tab.columnconfigure(1, weight=1)
 
         # ------------------------------------------------------------------
         # Shared progress and log area
@@ -1152,6 +1272,316 @@ class TmxSplitterApp:
         scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.configure(yscrollcommand=scroll.set)
+
+    def show_help(self):
+        win = tk.Toplevel(self.root)
+        win.title("Help")
+        win.geometry("900x640")
+        win.transient(self.root)
+        apply_window_icon(win)
+
+        container = ttk.Frame(win, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            container,
+            text="TMX Optimization and Splitting Tool Help",
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+
+        help_topics = {
+            "Overview": """TMX Optimization and Splitting Tool prepares TMX translation memories for safer CAT import.
+
+Main areas:
+- Split / Analyze: inspect TMX files and split large databases safely.
+- Optimize TMX: create cleaned TMX copies using selected rules and profiles.
+- Compare TMX: compare two TMX files or two sets of TMX files.
+- Export problem/result groups: export selected diagnostic groups for review or testing.
+- Settings / About: default settings, output paths, and program information.
+
+Original TMX files are never modified. New TMX files and XLSX reports are created in the selected output folder.""",
+            "Safety principle": """Original TMX files are treated as read-only input.
+
+Safe Split preserves original TU content whenever possible and splits only on <tu> boundaries.
+
+Optimize TMX creates new cleaned files in the output folder. Potentially risky actions, such as duplicate removal, noisy pair removal, language normalization, or inline-tag stripping, show warnings before processing.
+
+Dry run can be used to preview optimization results without creating an optimized TMX.""",
+            "Input files": """Use Add TMX files to select one or more TMX files.
+
+Remove selected removes highlighted files from the list. Clear removes all selected files from the list.
+
+Most operations support multiple files. For multi-file operations, TOST can also create batch summary reports.""",
+            "Output folder": """Output folder is where TOST saves split files, optimized TMX files, exported groups, and XLSX reports.
+
+The original TMX files remain unchanged.
+
+Open output folder opens the selected output directory in the operating system file manager.""",
+            "Source and target languages": """Source langs and Target langs define which language codes should be treated as source and target.
+
+Use comma-separated variants. Example:
+Source langs: en,en-us,en-gb
+Target langs: ru,ru-ru
+
+This is useful when TMX files contain mixed language-code variants such as en, en-US, en-GB, ru, and ru-RU.""",
+            "Safe Split": """Safe Split divides TMX files into smaller valid TMX files.
+
+It can split by file size or by TU count. It does not rewrite segment text, remove tags, or normalize language codes.
+
+Safe Split is intended for situations where the original TU content should be preserved as much as possible.""",
+            "Split by file size": """Split by file size creates output parts close to the specified size in MB.
+
+TOST still writes complete <tu> blocks only. It does not cut a translation unit in the middle.
+
+A single very large TU may make one part larger than the requested limit.""",
+            "Split by TU count": """Split by TU count creates a new output part after the selected number of written <tu> blocks.
+
+This is useful when a CAT system is sensitive to the number of translation units rather than file size.
+
+TU count mode counts written TU blocks only.""",
+            "Analyze": """Analyze checks selected TMX files and creates XLSX reports.
+
+It reports:
+- total TU;
+- potentially importable TU;
+- problem TU;
+- total detected issues;
+- error counts;
+- language statistics;
+- problem TU details with raw XML.
+
+Use Analyze before optimization to understand what is inside the database.""",
+            "Analyze before split": """Analyze TMX before splitting and create XLSX report runs analysis before Safe Split.
+
+This helps you see whether the input database already contains missing languages, empty segments, tag-only segments, XML parse problems, or language-code variants.""",
+            "Post-check after split": """Post-check created files after splitting analyzes the created split files after Safe Split.
+
+It confirms how many files were created and counts total TU, potentially importable TU, problem TU, and detected issues in the output parts.
+
+The post-check creates a separate XLSX report.""",
+            "Potentially importable TU": """Potentially importable TU is the number of translation units that contain the selected source and target languages and have no detected blocking issues.
+
+It is an estimate. A specific CAT system may still reject some units for its own internal reasons.""",
+            "Problem TU and detected issues": """Problem TU is the number of translation units that have at least one detected problem.
+
+Total detected issues can be higher than Problem TU because one TU can have several issues.
+
+Example: one TU can have both a tag-only source segment and a tag-only target segment.""",
+            "Language statistics": """Language statistics show which xml:lang values are present in the TMX.
+
+The report includes counts such as TUV count, TU count, non-empty segments, empty segments, and tag-only segments for each language code.
+
+This helps identify mixed variants such as en, en-US, en-GB, ru, and ru-RU.""",
+            "View problem TUs": """View problem TUs opens a table with problem translation units from the latest analysis.
+
+When you select a row, TOST shows the original raw TU XML below the table.
+
+This makes it possible to inspect problematic units without opening the source TMX manually.""",
+            "Open report": """Open report opens the latest relevant XLSX report created by Analyze, Optimize TMX, Compare TMX, Export, or post-check operations.
+
+If no report has been created yet, run the corresponding operation first.""",
+            "Open optimized TMX": """Open optimized TMX opens the latest optimized TMX file created by Optimize TMX.
+
+This button is not available for Dry run results because Dry run creates a report only and does not create an optimized TMX.""",
+            "Optimize TMX": """Optimize TMX creates a cleaned copy of the selected TMX files.
+
+Depending on selected options, it can remove missing, empty, tag-only, duplicate, noisy, one-character, punctuation-only, and malformed units.
+
+It can also normalize language codes, keep only the selected language pair, report inline-tag mismatches, and strip inline tags if requested.""",
+            "Basic cleanup options": """Basic cleanup options remove translation units that are likely to cause import problems.
+
+Available options:
+- remove TU without source language;
+- remove TU without target language;
+- remove TU with empty source or target segment;
+- remove TU with tag-only source or target segment;
+- remove TU with XML parse errors or malformed TU.
+
+Removed TU blocks are recorded in the optimization report.""",
+            "Tag-only TU": """A tag-only segment contains inline tags but no real text.
+
+Example: <seg><ph x=\"1\"/></seg>
+
+Such units are usually not useful for translation memory import and can be removed by Optimize TMX.""",
+            "Duplicate removal": """Remove exact duplicate source-target pairs keeps the first occurrence and removes later duplicate pairs.
+
+Duplicate detection is based on the selected source and target segment pair.
+
+Removed duplicates are written to the Removed duplicates sheet and can be reviewed or exported.""",
+            "Noisy segment rules": """Noisy rules detect short or technical-looking pairs such as punctuation-only entries.
+
+Available controls include:
+- a custom Noisy segment list;
+- list match mode: both source and target, or either source or target;
+- warnings for pairs where both texts are shorter than a selected character limit;
+- optional removal of pairs matching the noisy list;
+- optional removal of one-character or punctuation-only pairs.
+
+Review reports before using aggressive removal because short UI strings can sometimes be valid translations.""",
+            "Inline tags": """Inline tags are placeholders or formatting markers inside a segment, such as <ph>, <bpt>, <ept>, <it>, <ut>, <hi>, and <sub>.
+
+They can represent formatting, variables, links, line breaks, or other non-text elements.""",
+            "Inline-tag mismatch": """Inline-tag mismatch means the source and target do not have the same inline-tag sequence.
+
+By default TOST reports mismatches but does not remove the TU.
+
+The Inline-tag warnings result group stores tag sequences, previews, and raw TU XML for review.""",
+            "Strip inline tags": """Strip inline tags removes inline tags from kept TUs.
+
+Available options:
+- strip inline tags only from mismatched TUs;
+- strip inline tags from all kept TUs.
+
+This changes segment content. Use it only when the target CAT system rejects tagged units or when you intentionally want a plain-text memory.
+
+Changed TUs are recorded in the report with before and after XML.""",
+            "Language normalization": """Language normalization rewrites xml:lang values in the optimized output.
+
+For example, source en and target ru can be written as en-US and ru-RU.
+
+Segment text is not translated or changed by normalization. Only the language code attribute is changed.
+
+The target normalization codes are user-defined in the Normalize source language code to and Normalize target language code to fields.""",
+            "Keep selected language pair": """Keep only selected source-target language pair removes extra language variants from optimized output.
+
+TOST finds source and target TUVs using Source langs and Target langs. If this option is enabled, only the selected source and target TUVs are kept in the output TU.
+
+This is useful for preparing a clean bilingual TMX from a multilingual or mixed-code TMX.""",
+            "Optimization profiles": """Optimization profiles are presets that set optimization options.
+
+Built-in profiles:
+- General CAT-safe: conservative cleanup.
+- Strict import: stronger cleanup for stricter import workflows.
+- Smartcat-oriented: uses Smartcat-like strict import expectations as a practical reference, but the logic is general and can help with other CAT systems too.
+- Custom: keeps your current manual settings.
+
+Apply profile applies the selected profile to the current controls.""",
+            "User presets": """User presets let you save, delete, and import your own optimization settings.
+
+Save as preset stores the current optimization controls under a custom name.
+Delete preset removes a user preset.
+Import presets imports presets from JSON files.
+
+Built-in profiles cannot be overwritten or deleted. Imported presets are stored in tost_settings.json and become available in the same profile menu.""",
+            "Dry run": """Dry run creates a report only and does not create an optimized TMX.
+
+Use it before aggressive cleanup to see what would be removed or changed.
+
+Dry run is useful for testing duplicate removal, noisy pair removal, language normalization, selected language-pair filtering, and inline-tag stripping.""",
+            "Result summary": """Result summary shows compact before/after metrics after Analyze, Safe Split, or Optimize TMX.
+
+For optimization, it shows input status, output post-check status, removed counts, duplicate counts, noisy counts, one-character/punctuation removals, and changed TU counts.""",
+            "View optimization results": """After Optimize TMX, TOST can display result groups directly in the program.
+
+Available viewers:
+- View removed TUs;
+- View duplicates;
+- View noisy warnings;
+- View inline-tag warnings;
+- View changed TUs.
+
+Selecting a row shows raw XML or detailed information below the table.""",
+            "Compare TMX": """Compare TMX compares two TMX files or two sets of TMX files using the current source and target language settings.
+
+If one file is selected on each side, they are compared directly even if names differ.
+
+If multiple files are selected, TOST matches files by filename.
+
+The compare report includes summary metrics, per-file metrics, matched files, files only in A, files only in B, and language statistics for both sides.""",
+            "Export problem/result groups": """Export selected problem or optimization result groups to XLSX, Raw XML TXT, or TMX.
+
+Groups include:
+- Problem TUs;
+- Removed TUs;
+- Removed duplicates;
+- Noisy warnings;
+- Inline-tag warnings;
+- Changed TUs.
+
+Use Export problem TUs after Analyze. Use Export result groups after Optimize TMX.""",
+            "Export formats": """XLSX report creates a spreadsheet with all available columns.
+
+Raw XML TXT writes original raw <tu> XML blocks to a text file for manual inspection.
+
+TMX file wraps selected TU blocks into a valid TMX file for testing or re-importing selected units.""",
+            "Batch summary reports": """When multiple files are processed, TOST can create batch summary reports.
+
+Batch reports summarize totals across all processed files and also list per-file metrics.
+
+They are useful for large translation memories split into many parts.""",
+            "Reports": """TOST creates XLSX reports for analysis, optimization, dry run, split post-check, compare, export, and batch operations.
+
+Reports are intended to make every removal, warning, or change auditable.
+
+Typical sheets include Summary, Error counts, Language statistics, Problems, Removed TUs, Removed duplicates, Noisy warnings, Inline-tag warnings, Changed TUs, and batch/file summaries.""",
+            "Settings / About": """Settings / About contains default output folder, default split settings, default language variants, default prefix, and default analysis/post-check settings.
+
+Save settings writes settings to tost_settings.json.
+Reset settings restores defaults.
+Open settings folder opens the folder containing the settings file.
+
+About explains the basic safety principle and application version.""",
+            "Safety checks and warnings": """Before running operations, TOST checks required input and settings.
+
+Examples:
+- selected TMX files;
+- output folder availability;
+- valid split size or TU count;
+- non-empty source and target language lists;
+- non-conflicting source and target language sets;
+- valid language normalization codes.
+
+Risky optimization actions show a confirmation warning before processing.""",
+        }
+
+        body = ttk.Frame(container)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        left = ttk.LabelFrame(body, text="Function", padding=6)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+
+        topic_list = tk.Listbox(left, width=30, height=24, exportselection=False)
+        topic_scroll = ttk.Scrollbar(left, orient="vertical", command=topic_list.yview)
+        topic_list.configure(yscrollcommand=topic_scroll.set)
+        topic_list.pack(side=tk.LEFT, fill=tk.Y)
+        topic_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        right = ttk.LabelFrame(body, text="Description", padding=6)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        title_var = tk.StringVar(value="")
+        ttk.Label(right, textvariable=title_var, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        text_frame = ttk.Frame(right)
+        text_frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(text_frame, wrap="word", height=26, borderwidth=1, relief="solid")
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        topics = list(help_topics.keys())
+        for topic in topics:
+            topic_list.insert(tk.END, topic)
+
+        def show_topic(event=None):
+            selection = topic_list.curselection()
+            if not selection:
+                return
+            topic = topics[selection[0]]
+            title_var.set(topic)
+            text_widget.configure(state="normal")
+            text_widget.delete("1.0", tk.END)
+            text_widget.insert("1.0", help_topics[topic])
+            text_widget.configure(state="disabled")
+
+        topic_list.bind("<<ListboxSelect>>", show_topic)
+        topic_list.selection_set(0)
+        topic_list.activate(0)
+        show_topic()
+
+        ttk.Button(container, text="Close", command=win.destroy).pack(anchor="e", pady=(8, 0))
 
     def show_settings_about(self):
         win = tk.Toplevel(self.root)
@@ -1255,6 +1685,11 @@ class TmxSplitterApp:
                 self.opt_remove_noisy.set(bool(data.get("opt_remove_noisy", self.opt_remove_noisy.get())))
                 self.opt_remove_one_char_punct.set(bool(data.get("opt_remove_one_char_punct", self.opt_remove_one_char_punct.get())))
                 self.opt_noisy_segments.set(data.get("opt_noisy_segments", self.opt_noisy_segments.get()))
+                mode = data.get("opt_noisy_match_mode", self.opt_noisy_match_mode.get())
+                if mode in ("Both source and target", "Either source or target"):
+                    self.opt_noisy_match_mode.set(mode)
+                self.opt_warn_min_length.set(bool(data.get("opt_warn_min_length", self.opt_warn_min_length.get())))
+                self.opt_min_text_length.set(str(data.get("opt_min_text_length", self.opt_min_text_length.get()) or "2"))
                 self.opt_report_inline_tag_mismatch.set(bool(data.get("opt_report_inline_tag_mismatch", self.opt_report_inline_tag_mismatch.get())))
                 self.opt_strip_mismatched_inline_tags.set(bool(data.get("opt_strip_mismatched_inline_tags", self.opt_strip_mismatched_inline_tags.get())))
                 self.opt_strip_all_inline_tags.set(bool(data.get("opt_strip_all_inline_tags", self.opt_strip_all_inline_tags.get())))
@@ -1264,13 +1699,20 @@ class TmxSplitterApp:
                 self.opt_normalize_source_code.set(data.get("opt_normalize_source_code", self.opt_normalize_source_code.get()) or DEFAULT_NORMALIZE_SOURCE_LANG)
                 self.opt_normalize_target_code.set(data.get("opt_normalize_target_code", self.opt_normalize_target_code.get()) or DEFAULT_NORMALIZE_TARGET_LANG)
                 self.opt_dry_run.set(bool(data.get("opt_dry_run", self.opt_dry_run.get())))
+                saved_profiles = data.get("user_profiles", {})
+                if isinstance(saved_profiles, dict):
+                    self.user_profiles = {}
+                    for name, state in saved_profiles.items():
+                        clean_name = str(name).strip()
+                        if clean_name and clean_name not in self.builtin_profile_values and isinstance(state, dict):
+                            self.user_profiles[clean_name] = state
                 profile = data.get("opt_profile", self.opt_profile.get())
-                if profile in ("General CAT-safe", "Strict import", "Smartcat-oriented", "Custom"):
+                if profile in self.builtin_profile_values or profile in self.user_profiles:
                     self.opt_profile.set(profile)
         except Exception:
             pass
 
-    def save_settings(self):
+    def save_settings(self, silent=False):
         data = {
             "output_dir": self.output_dir.get(),
             "max_mb": self.max_mb.get(),
@@ -1291,6 +1733,9 @@ class TmxSplitterApp:
             "opt_remove_noisy": bool(self.opt_remove_noisy.get()),
             "opt_remove_one_char_punct": bool(self.opt_remove_one_char_punct.get()),
             "opt_noisy_segments": self.opt_noisy_segments.get(),
+            "opt_noisy_match_mode": self.opt_noisy_match_mode.get(),
+            "opt_warn_min_length": bool(self.opt_warn_min_length.get()),
+            "opt_min_text_length": self.opt_min_text_length.get().strip() or "2",
             "opt_report_inline_tag_mismatch": bool(self.opt_report_inline_tag_mismatch.get()),
             "opt_strip_mismatched_inline_tags": bool(self.opt_strip_mismatched_inline_tags.get()),
             "opt_strip_all_inline_tags": bool(self.opt_strip_all_inline_tags.get()),
@@ -1301,14 +1746,17 @@ class TmxSplitterApp:
             "opt_normalize_target_code": self.opt_normalize_target_code.get().strip() or DEFAULT_NORMALIZE_TARGET_LANG,
             "opt_profile": self.opt_profile.get(),
             "opt_dry_run": bool(self.opt_dry_run.get()),
+            "user_profiles": self.user_profiles,
         }
         path = get_settings_path()
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo(APP_TITLE, f"Settings saved:\n{path}")
+            if not silent:
+                messagebox.showinfo(APP_TITLE, f"Settings saved:\n{path}")
         except Exception as exc:
-            messagebox.showerror(APP_TITLE, f"Could not save settings:\n{exc}")
+            if not silent:
+                messagebox.showerror(APP_TITLE, f"Could not save settings:\n{exc}")
 
     def reset_settings(self):
         self.output_dir.set(os.path.abspath("output"))
@@ -1330,6 +1778,9 @@ class TmxSplitterApp:
         self.opt_remove_noisy.set(False)
         self.opt_remove_one_char_punct.set(False)
         self.opt_noisy_segments.set("-, :, ;, ., •, *, +, %")
+        self.opt_noisy_match_mode.set("Both source and target")
+        self.opt_warn_min_length.set(False)
+        self.opt_min_text_length.set("2")
         self.opt_report_inline_tag_mismatch.set(True)
         self.opt_strip_mismatched_inline_tags.set(False)
         self.opt_strip_all_inline_tags.set(False)
@@ -1342,8 +1793,232 @@ class TmxSplitterApp:
         self.opt_dry_run.set(False)
         messagebox.showinfo(APP_TITLE, "Settings reset to defaults. Click Save settings to persist them.")
 
+    def rebuild_profile_menu(self):
+        menu = getattr(self, "profile_menu", None)
+        if menu is None:
+            return
+        try:
+            menu.delete(0, tk.END)
+        except Exception:
+            return
+        self.profile_values = tuple(self.builtin_profile_values) + tuple(sorted(self.user_profiles.keys(), key=str.lower))
+        for profile_name in self.builtin_profile_values:
+            menu.add_radiobutton(
+                label=profile_name,
+                variable=self.opt_profile,
+                value=profile_name,
+                command=self.hide_profile_menu_tooltip,
+            )
+        if self.user_profiles:
+            menu.add_separator()
+            for profile_name in sorted(self.user_profiles.keys(), key=str.lower):
+                menu.add_radiobutton(
+                    label=profile_name,
+                    variable=self.opt_profile,
+                    value=profile_name,
+                    command=self.hide_profile_menu_tooltip,
+                )
+
+    def get_current_optimization_preset_state(self):
+        return {
+            "source_langs": self.source_langs.get(),
+            "target_langs": self.target_langs.get(),
+            "opt_remove_missing_source": bool(self.opt_remove_missing_source.get()),
+            "opt_remove_missing_target": bool(self.opt_remove_missing_target.get()),
+            "opt_remove_empty": bool(self.opt_remove_empty.get()),
+            "opt_remove_tag_only": bool(self.opt_remove_tag_only.get()),
+            "opt_remove_xml_errors": bool(self.opt_remove_xml_errors.get()),
+            "opt_remove_duplicates": bool(self.opt_remove_duplicates.get()),
+            "opt_warn_noisy": bool(self.opt_warn_noisy.get()),
+            "opt_remove_noisy": bool(self.opt_remove_noisy.get()),
+            "opt_remove_one_char_punct": bool(self.opt_remove_one_char_punct.get()),
+            "opt_noisy_segments": self.opt_noisy_segments.get(),
+            "opt_noisy_match_mode": self.opt_noisy_match_mode.get(),
+            "opt_warn_min_length": bool(self.opt_warn_min_length.get()),
+            "opt_min_text_length": self.opt_min_text_length.get().strip() or "2",
+            "opt_report_inline_tag_mismatch": bool(self.opt_report_inline_tag_mismatch.get()),
+            "opt_strip_mismatched_inline_tags": bool(self.opt_strip_mismatched_inline_tags.get()),
+            "opt_strip_all_inline_tags": bool(self.opt_strip_all_inline_tags.get()),
+            "opt_keep_selected_pair": bool(self.opt_keep_selected_pair.get()),
+            "opt_normalize_source_lang": bool(self.opt_normalize_source_lang.get()),
+            "opt_normalize_target_lang": bool(self.opt_normalize_target_lang.get()),
+            "opt_normalize_source_code": self.opt_normalize_source_code.get().strip() or DEFAULT_NORMALIZE_SOURCE_LANG,
+            "opt_normalize_target_code": self.opt_normalize_target_code.get().strip() or DEFAULT_NORMALIZE_TARGET_LANG,
+            "opt_dry_run": bool(self.opt_dry_run.get()),
+        }
+
+    def apply_optimization_preset_state(self, state):
+        if not isinstance(state, dict):
+            return
+        if "source_langs" in state:
+            self.source_langs.set(state.get("source_langs") or self.source_langs.get())
+        if "target_langs" in state:
+            self.target_langs.set(state.get("target_langs") or self.target_langs.get())
+        bool_map = {
+            "opt_remove_missing_source": self.opt_remove_missing_source,
+            "opt_remove_missing_target": self.opt_remove_missing_target,
+            "opt_remove_empty": self.opt_remove_empty,
+            "opt_remove_tag_only": self.opt_remove_tag_only,
+            "opt_remove_xml_errors": self.opt_remove_xml_errors,
+            "opt_remove_duplicates": self.opt_remove_duplicates,
+            "opt_warn_noisy": self.opt_warn_noisy,
+            "opt_remove_noisy": self.opt_remove_noisy,
+            "opt_remove_one_char_punct": self.opt_remove_one_char_punct,
+            "opt_warn_min_length": self.opt_warn_min_length,
+            "opt_report_inline_tag_mismatch": self.opt_report_inline_tag_mismatch,
+            "opt_strip_mismatched_inline_tags": self.opt_strip_mismatched_inline_tags,
+            "opt_strip_all_inline_tags": self.opt_strip_all_inline_tags,
+            "opt_keep_selected_pair": self.opt_keep_selected_pair,
+            "opt_normalize_source_lang": self.opt_normalize_source_lang,
+            "opt_normalize_target_lang": self.opt_normalize_target_lang,
+            "opt_dry_run": self.opt_dry_run,
+        }
+        for key, var in bool_map.items():
+            if key in state:
+                var.set(bool(state.get(key)))
+        if "opt_noisy_segments" in state:
+            self.opt_noisy_segments.set(state.get("opt_noisy_segments") or "-, :, ;, ., •, *, +, %")
+        if state.get("opt_noisy_match_mode") in ("Both source and target", "Either source or target"):
+            self.opt_noisy_match_mode.set(state.get("opt_noisy_match_mode"))
+        if "opt_min_text_length" in state:
+            self.opt_min_text_length.set(str(state.get("opt_min_text_length") or "2"))
+        if "opt_normalize_source_code" in state:
+            self.opt_normalize_source_code.set(state.get("opt_normalize_source_code") or DEFAULT_NORMALIZE_SOURCE_LANG)
+        if "opt_normalize_target_code" in state:
+            self.opt_normalize_target_code.set(state.get("opt_normalize_target_code") or DEFAULT_NORMALIZE_TARGET_LANG)
+
+    def save_current_optimization_preset(self):
+        name = simpledialog.askstring(APP_TITLE, "Preset name:", parent=self.root)
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning(APP_TITLE, "Preset name cannot be empty.")
+            return
+        if name in self.builtin_profile_values:
+            messagebox.showwarning(APP_TITLE, "Built-in profile names cannot be overwritten. Choose another name.")
+            return
+        if name in self.user_profiles:
+            if not messagebox.askyesno(APP_TITLE, f"Preset already exists:\n{name}\n\nOverwrite it?"):
+                return
+        self.user_profiles[name] = self.get_current_optimization_preset_state()
+        self.opt_profile.set(name)
+        self.rebuild_profile_menu()
+        self.save_settings(silent=True)
+        self.log(f"Saved user optimization preset: {name}")
+
+    def delete_selected_optimization_preset(self):
+        name = self.opt_profile.get()
+        if name not in self.user_profiles:
+            messagebox.showinfo(APP_TITLE, "Only user presets can be deleted. Built-in profiles are always available.")
+            return
+        if not messagebox.askyesno(APP_TITLE, f"Delete user preset?\n\n{name}"):
+            return
+        del self.user_profiles[name]
+        self.opt_profile.set("Custom")
+        self.rebuild_profile_menu()
+        self.save_settings(silent=True)
+        self.log(f"Deleted user optimization preset: {name}")
+
+    def sanitize_imported_preset_state(self, state):
+        if not isinstance(state, dict):
+            return None
+        allowed_keys = set(self.get_current_optimization_preset_state().keys())
+        cleaned = {key: value for key, value in state.items() if key in allowed_keys}
+        return cleaned if cleaned else None
+
+    def collect_imported_presets(self, data):
+        if not isinstance(data, dict):
+            return {}
+        raw_presets = None
+        if isinstance(data.get("tost_presets"), dict):
+            raw_presets = data.get("tost_presets")
+        elif isinstance(data.get("user_profiles"), dict):
+            raw_presets = data.get("user_profiles")
+        elif isinstance(data.get("presets"), dict):
+            raw_presets = data.get("presets")
+        elif isinstance(data.get("name"), str) and isinstance(data.get("state"), dict):
+            raw_presets = {data.get("name"): data.get("state")}
+        else:
+            raw_presets = data
+
+        presets = {}
+        if not isinstance(raw_presets, dict):
+            return presets
+        for name, state in raw_presets.items():
+            clean_name = str(name).strip()
+            if not clean_name or clean_name in self.builtin_profile_values:
+                continue
+            clean_state = self.sanitize_imported_preset_state(state)
+            if clean_state is not None:
+                presets[clean_name] = clean_state
+        return presets
+
+    def import_optimization_presets(self):
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Import optimization presets",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            imported = self.collect_imported_presets(data)
+            if not imported:
+                messagebox.showwarning(APP_TITLE, "No valid user presets were found in the selected file.")
+                return
+
+            conflicts = [name for name in imported if name in self.user_profiles]
+            if conflicts:
+                conflict_preview = "\n".join(conflicts[:20])
+                if len(conflicts) > 20:
+                    conflict_preview += f"\n... and {len(conflicts) - 20} more"
+                answer = messagebox.askyesnocancel(
+                    APP_TITLE,
+                    "Some presets already exist.\n\n"
+                    f"{conflict_preview}\n\n"
+                    "Yes - overwrite existing presets.\n"
+                    "No - import only new presets.\n"
+                    "Cancel - do not import.",
+                )
+                if answer is None:
+                    return
+                overwrite = bool(answer)
+            else:
+                overwrite = True
+
+            added = 0
+            skipped = 0
+            overwritten = 0
+            for name, state in imported.items():
+                if name in self.user_profiles:
+                    if not overwrite:
+                        skipped += 1
+                        continue
+                    overwritten += 1
+                else:
+                    added += 1
+                self.user_profiles[name] = state
+
+            self.rebuild_profile_menu()
+            self.save_settings(silent=True)
+            self.log(f"Imported optimization presets from: {path}")
+            self.log(f"Preset import result: added {added}, overwritten {overwritten}, skipped {skipped}")
+            messagebox.showinfo(
+                APP_TITLE,
+                f"Preset import completed.\n\nAdded: {added}\nOverwritten: {overwritten}\nSkipped: {skipped}",
+            )
+        except Exception as exc:
+            messagebox.showerror(APP_TITLE, f"Could not import presets:\n{exc}")
+
     def get_profile_description(self, profile):
-        return self.profile_descriptions.get(profile, "")
+        if profile in self.profile_descriptions:
+            return self.profile_descriptions.get(profile, "")
+        if profile in self.user_profiles:
+            return "User preset. Applies the optimization settings that were saved under this name."
+        return ""
 
     def get_current_profile_description(self):
         return self.get_profile_description(self.opt_profile.get())
@@ -1359,6 +2034,11 @@ class TmxSplitterApp:
     def apply_optimization_profile(self):
         profile = self.opt_profile.get()
 
+        if profile in self.user_profiles:
+            self.apply_optimization_preset_state(self.user_profiles[profile])
+            self.log(f"Applied user optimization preset: {profile}")
+            return
+
         if profile == "General CAT-safe":
             self.opt_remove_missing_source.set(True)
             self.opt_remove_missing_target.set(True)
@@ -1369,6 +2049,9 @@ class TmxSplitterApp:
             self.opt_warn_noisy.set(True)
             self.opt_remove_noisy.set(False)
             self.opt_remove_one_char_punct.set(False)
+            self.opt_noisy_match_mode.set("Both source and target")
+            self.opt_warn_min_length.set(False)
+            self.opt_min_text_length.set("2")
             self.opt_report_inline_tag_mismatch.set(True)
             self.opt_strip_mismatched_inline_tags.set(False)
             self.opt_strip_all_inline_tags.set(False)
@@ -1387,6 +2070,9 @@ class TmxSplitterApp:
             self.opt_warn_noisy.set(True)
             self.opt_remove_noisy.set(False)
             self.opt_remove_one_char_punct.set(False)
+            self.opt_noisy_match_mode.set("Both source and target")
+            self.opt_warn_min_length.set(False)
+            self.opt_min_text_length.set("2")
             self.opt_report_inline_tag_mismatch.set(True)
             self.opt_strip_mismatched_inline_tags.set(False)
             self.opt_strip_all_inline_tags.set(False)
@@ -1406,6 +2092,9 @@ class TmxSplitterApp:
             self.opt_remove_noisy.set(True)
             self.opt_remove_one_char_punct.set(True)
             self.opt_noisy_segments.set("-, :, ;, ., •, *, +, %")
+            self.opt_noisy_match_mode.set("Both source and target")
+            self.opt_warn_min_length.set(False)
+            self.opt_min_text_length.set("2")
             self.opt_report_inline_tag_mismatch.set(True)
             self.opt_strip_mismatched_inline_tags.set(False)
             self.opt_strip_all_inline_tags.set(False)
@@ -1477,6 +2166,8 @@ class TmxSplitterApp:
         self.analyze_btn.config(state=state)
         if hasattr(self, "optimize_btn"):
             self.optimize_btn.config(state=state)
+        if hasattr(self, "compare_btn"):
+            self.compare_btn.config(state=state)
         self.cancel_btn.config(state=tk.NORMAL if running else tk.DISABLED)
         if hasattr(self, "save_settings_btn") and self.save_settings_btn.winfo_exists():
             self.save_settings_btn.config(state=state)
@@ -1764,6 +2455,291 @@ class TmxSplitterApp:
             message_if_empty="No changed TUs are available. Run Optimize TMX with language normalization or inline-tag stripping enabled.",
         )
 
+
+    def _available_export_groups(self):
+        groups = [
+            ("Problem TUs", self.last_problem_tus),
+            ("Removed TUs", self.last_removed_tus),
+            ("Removed duplicates", self.last_duplicate_tus),
+            ("Noisy warnings", self.last_noisy_warnings),
+            ("Inline-tag warnings", self.last_inline_tag_warnings),
+            ("Changed TUs", self.last_changed_tus),
+        ]
+        return [(name, rows) for name, rows in groups if rows]
+
+    @staticmethod
+    def _dict_rows_to_sheet(rows):
+        if not rows:
+            return [["No rows"]]
+        preferred = [
+            "tu_number", "line", "problems", "remove_reason", "detected_problems", "action", "reason",
+            "languages", "source_preview", "target_preview", "source_text", "target_text",
+            "removed_tu_number", "removed_line", "kept_tu_number", "duplicate_kept_tu_number",
+            "change_type", "source_tag_sequence", "target_tag_sequence",
+            "source_tag_sequence_before", "target_tag_sequence_before",
+            "raw_tu_xml", "removed_raw_tu_xml", "kept_raw_tu_xml", "raw_tu_xml_before", "raw_tu_xml_after",
+            "xml_error",
+        ]
+        keys = []
+        for key in preferred:
+            if any(key in row for row in rows):
+                keys.append(key)
+        for row in rows:
+            for key in row.keys():
+                if key not in keys:
+                    keys.append(key)
+        sheet = [keys]
+        for row in rows:
+            sheet.append([row.get(key, "") for key in keys])
+        return sheet
+
+    @staticmethod
+    def _extract_raw_xml_from_row(row):
+        for key in ("raw_tu_xml", "removed_raw_tu_xml", "raw_tu_xml_after", "raw_tu_xml_before"):
+            val = row.get(key)
+            if val:
+                return str(val)
+        return ""
+
+    def export_result_groups_dialog(self, default_groups=None):
+        groups = self._available_export_groups()
+        if not groups:
+            messagebox.showinfo(APP_TITLE, "No result groups are available yet. Run Analyze or Optimize TMX first.")
+            return
+
+        default_groups = set(default_groups or [])
+        win = tk.Toplevel(self.root)
+        win.title("Export result groups")
+        win.geometry("560x385")
+        win.transient(self.root)
+        win.grab_set()
+        apply_window_icon(win)
+
+        container = ttk.Frame(win, padding=10)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            container,
+            text="Select result groups and output format.",
+            wraplength=520,
+        ).pack(anchor="w", pady=(0, 8))
+
+        vars_by_name = {}
+        group_box = ttk.LabelFrame(container, text="Groups", padding=6)
+        group_box.pack(fill=tk.X, pady=(0, 8))
+        for name, rows in groups:
+            selected = (name in default_groups) if default_groups else True
+            var = tk.BooleanVar(value=selected)
+            vars_by_name[name] = var
+            ttk.Checkbutton(group_box, text=f"{name} ({len(rows)})", variable=var).pack(anchor="w")
+
+        format_var = tk.StringVar(value="XLSX report")
+        format_row = ttk.Frame(container)
+        format_row.pack(fill=tk.X, pady=(0, 0))
+        ttk.Label(format_row, text="Format:").pack(side=tk.LEFT)
+        ttk.Combobox(
+            format_row,
+            textvariable=format_var,
+            values=("XLSX report", "Raw XML TXT", "TMX file"),
+            width=18,
+            state="readonly",
+        ).pack(side=tk.LEFT, padx=6)
+
+        format_help_frame = ttk.Frame(container)
+        format_help_frame.pack(anchor="w", fill=tk.X, pady=(8, 10))
+
+        help_rows = (
+            ("XLSX report", "Exports selected groups as workbook sheets with all available columns."),
+            ("Raw XML TXT", "Exports original TU XML blocks as plain text for manual inspection."),
+            ("TMX file", "Exports available TU XML blocks into a valid TMX file for reimport/testing."),
+        )
+        for i, (fmt_name, fmt_desc) in enumerate(help_rows):
+            row = ttk.Frame(format_help_frame)
+            row.grid(row=i, column=0, sticky="w", pady=(0, 2 if i < len(help_rows) - 1 else 0))
+            name_lbl = ttk.Label(row, text=f"{fmt_name}:", font=("TkDefaultFont", 9, "bold"), foreground="#555555", width=13, anchor="e")
+            name_lbl.grid(row=0, column=0, sticky="ne", padx=(0, 8))
+            desc_lbl = ttk.Label(row, text=fmt_desc, foreground="#555555", wraplength=390, justify=tk.LEFT)
+            desc_lbl.grid(row=0, column=1, sticky="w")
+
+        def ask_save(**kwargs):
+            # With a grabbed modal dialog, native file dialogs can appear behind the
+            # export window on some Windows setups unless we temporarily release the grab.
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            try:
+                return filedialog.asksaveasfilename(parent=win, **kwargs)
+            finally:
+                try:
+                    if win.winfo_exists():
+                        win.grab_set()
+                        win.lift()
+                except Exception:
+                    pass
+
+        def do_export():
+            try:
+                selected_groups = [(name, rows) for name, rows in groups if vars_by_name[name].get()]
+                if not selected_groups:
+                    messagebox.showwarning(APP_TITLE, "Select at least one result group to export.", parent=win)
+                    return
+
+                out_dir = self.output_dir.get().strip() or os.getcwd()
+                os.makedirs(out_dir, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                fmt = format_var.get()
+                if fmt == "XLSX report":
+                    path = ask_save(
+                        title="Save exported result groups",
+                        initialdir=out_dir,
+                        initialfile=f"tost_exported_result_groups_{timestamp}.xlsx",
+                        defaultextension=".xlsx",
+                        filetypes=[("Excel workbook", "*.xlsx")],
+                    )
+                    if not path:
+                        return
+                    sheets = []
+                    for name, rows in selected_groups:
+                        sheets.append((name, self._dict_rows_to_sheet(rows)))
+                    write_xlsx(path, sheets)
+                elif fmt == "Raw XML TXT":
+                    path = ask_save(
+                        title="Save exported raw XML",
+                        initialdir=out_dir,
+                        initialfile=f"tost_exported_result_groups_{timestamp}.txt",
+                        defaultextension=".txt",
+                        filetypes=[("Text file", "*.txt")],
+                    )
+                    if not path:
+                        return
+                    parts = []
+                    for name, rows in selected_groups:
+                        parts.append(f"===== {name} ({len(rows)}) =====\n")
+                        for idx, row in enumerate(rows, 1):
+                            xml = self._extract_raw_xml_from_row(row)
+                            parts.append(f"\n--- {name} #{idx} ---\n")
+                            if xml:
+                                parts.append(xml.rstrip() + "\n")
+                            else:
+                                parts.append("No raw TU XML available for this row.\n")
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write("".join(parts))
+                else:
+                    path = ask_save(
+                        title="Save exported TMX",
+                        initialdir=out_dir,
+                        initialfile=f"tost_exported_result_groups_{timestamp}.tmx",
+                        defaultextension=".tmx",
+                        filetypes=[("TMX file", "*.tmx")],
+                    )
+                    if not path:
+                        return
+                    tu_blocks = []
+                    seen = set()
+                    for _name, rows in selected_groups:
+                        for row in rows:
+                            xml = self._extract_raw_xml_from_row(row).strip()
+                            if xml and xml not in seen:
+                                seen.add(xml)
+                                tu_blocks.append(xml)
+                    if not tu_blocks:
+                        messagebox.showwarning(APP_TITLE, "Selected groups do not contain raw TU XML blocks that can be exported as TMX.", parent=win)
+                        return
+                    source_lang = (sorted(parse_lang_set(self.source_langs.get())) or ["en"])[0]
+                    with open(path, "w", encoding="utf-8", newline="\n") as f:
+                        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+                        f.write('<tmx version="1.4">\n')
+                        f.write(f'  <header creationtool="{escape(APP_SHORT_NAME)}" creationtoolversion="4.2.5" segtype="sentence" adminlang="en" srclang="{escape(source_lang)}" datatype="PlainText"/>\n')
+                        f.write('  <body>\n')
+                        for xml in tu_blocks:
+                            f.write(xml.rstrip() + "\n")
+                        f.write('  </body>\n</tmx>\n')
+
+                self.last_report_path = path
+                self.log(f"Exported selected result groups: {path}")
+                messagebox.showinfo(APP_TITLE, f"Export completed:\n{path}", parent=win)
+                win.destroy()
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"Export failed:\n{exc}", parent=win)
+                self.log(f"Export failed: {exc}")
+
+        actions = ttk.Frame(container)
+        actions.pack(fill=tk.X, side=tk.BOTTOM)
+        ttk.Button(actions, text="Export", command=do_export).pack(side=tk.LEFT)
+        ttk.Button(actions, text="Cancel", command=win.destroy).pack(side=tk.LEFT, padx=6)
+
+    def format_compare_files_label(self, files):
+        if not files:
+            return "No TMX files selected"
+        if len(files) == 1:
+            return files[0]
+        return f"{len(files)} TMX files selected"
+
+    def choose_compare_files_a(self):
+        initial_dir = os.path.dirname(self.compare_files_a[0]) if self.compare_files_a else os.getcwd()
+        paths = filedialog.askopenfilenames(
+            title="Select TMX file(s) for side A",
+            initialdir=initial_dir,
+            filetypes=[("TMX files", "*.tmx"), ("All files", "*.*")],
+        )
+        if paths:
+            self.compare_files_a = [os.path.abspath(p) for p in paths]
+            self.compare_files_a_label.set(self.format_compare_files_label(self.compare_files_a))
+
+    def choose_compare_files_b(self):
+        initial_dir = os.path.dirname(self.compare_files_b[0]) if self.compare_files_b else os.getcwd()
+        paths = filedialog.askopenfilenames(
+            title="Select TMX file(s) for side B",
+            initialdir=initial_dir,
+            filetypes=[("TMX files", "*.tmx"), ("All files", "*.*")],
+        )
+        if paths:
+            self.compare_files_b = [os.path.abspath(p) for p in paths]
+            self.compare_files_b_label.set(self.format_compare_files_label(self.compare_files_b))
+
+    def clear_compare_files_a(self):
+        self.compare_files_a = []
+        self.compare_files_a_label.set(self.format_compare_files_label(self.compare_files_a))
+
+    def clear_compare_files_b(self):
+        self.compare_files_b = []
+        self.compare_files_b_label.set(self.format_compare_files_label(self.compare_files_b))
+
+    def start_compare(self):
+        files_a = [p for p in self.compare_files_a if os.path.isfile(p) and p.lower().endswith(".tmx")]
+        files_b = [p for p in self.compare_files_b if os.path.isfile(p) and p.lower().endswith(".tmx")]
+        output_dir = self.output_dir.get().strip()
+        if not files_a:
+            messagebox.showerror(APP_TITLE, "TMX A is not selected or does not contain valid TMX files.")
+            return
+        if not files_b:
+            messagebox.showerror(APP_TITLE, "TMX B is not selected or does not contain valid TMX files.")
+            return
+        if not self.validate_output_folder(output_dir):
+            return
+        source_langs = parse_lang_set(self.source_langs.get())
+        target_langs = parse_lang_set(self.target_langs.get())
+        if not source_langs or not target_langs:
+            messagebox.showerror(APP_TITLE, "Source langs and target langs cannot be empty.")
+            return
+        if source_langs & target_langs:
+            overlap = ", ".join(sorted(source_langs & target_langs))
+            if not messagebox.askyesno(APP_TITLE, f"Source and target language lists overlap: {overlap}\n\nContinue anyway?"):
+                return
+
+        self.cancel_event.clear()
+        self.set_running(True)
+        self.progress.config(value=0, maximum=100)
+        self.log_text.delete("1.0", tk.END)
+        self.last_report_path = None
+        self.result_summary.set("Result summary: comparing TMX folders...")
+        self.log(APP_TITLE)
+        self.log("Comparing selected TMX files. Original TMX files will not be modified.")
+        args = (files_a, files_b, output_dir, source_langs, target_langs)
+        self.worker = threading.Thread(target=self.compare_worker_main, args=args, daemon=True)
+        self.worker.start()
+
     def start_split(self):
         self.start_worker(mode="split")
 
@@ -1874,6 +2850,14 @@ class TmxSplitterApp:
             if self.opt_remove_noisy.get() and not parse_noisy_set(self.opt_noisy_segments.get()):
                 messagebox.showerror(APP_TITLE, "Noisy segment list is empty, but noisy segment removal is enabled.")
                 return
+            if self.opt_warn_min_length.get():
+                try:
+                    min_len = int(self.opt_min_text_length.get().strip())
+                    if min_len <= 0:
+                        raise ValueError
+                except ValueError:
+                    messagebox.showerror(APP_TITLE, "Minimum text length must be a positive integer.")
+                    return
             if self.opt_normalize_source_lang.get():
                 code = self.opt_normalize_source_code.get().strip()
                 if code and not self.is_valid_language_code(code):
@@ -1986,6 +2970,286 @@ class TmxSplitterApp:
         except Exception as exc:
             self.queue.put(("error", str(exc)))
 
+    def list_tmx_files_in_folder(self, folder, recursive=False):
+        files = {}
+        folder = os.path.abspath(folder)
+        if recursive:
+            for root_dir, _dirs, names in os.walk(folder):
+                for name in names:
+                    if name.lower().endswith(".tmx"):
+                        path = os.path.join(root_dir, name)
+                        rel = os.path.relpath(path, folder).replace("\\", "/")
+                        files[rel.lower()] = {"key": rel, "path": path}
+        else:
+            for name in os.listdir(folder):
+                path = os.path.join(folder, name)
+                if os.path.isfile(path) and name.lower().endswith(".tmx"):
+                    files[name.lower()] = {"key": name, "path": path}
+        return files
+
+
+    def build_compare_file_map(self, paths):
+        files = {}
+        valid_paths = [os.path.abspath(p) for p in paths if os.path.isfile(p) and p.lower().endswith(".tmx")]
+        if len(valid_paths) == 1:
+            name = os.path.basename(valid_paths[0])
+            return {"selected_tmx_file": {"key": name, "path": valid_paths[0]}}
+        for path in valid_paths:
+            name = os.path.basename(path)
+            key = name.lower()
+            if key in files:
+                base, ext = os.path.splitext(name)
+                i = 2
+                while f"{base}_{i}{ext}".lower() in files:
+                    i += 1
+                key = f"{base}_{i}{ext}".lower()
+                name = f"{base}_{i}{ext}"
+            files[key] = {"key": name, "path": path}
+        return files
+
+    def analyze_tmx_for_comparison(self, path, source_langs, target_langs):
+        total = 0
+        ok = 0
+        counts = {
+            "missing_source_lang": 0,
+            "missing_target_lang": 0,
+            "empty_source_seg": 0,
+            "empty_target_seg": 0,
+            "tag_only_source_seg": 0,
+            "tag_only_target_seg": 0,
+            "xml_parse_error": 0,
+            "no_tuv_found": 0,
+        }
+        language_stats = {}
+        last_update = time.time()
+        for _line_no, tu_bytes in iter_tu_blocks(path):
+            if self.cancel_event.is_set():
+                return None
+            total += 1
+            info = analyze_tu(tu_bytes, source_langs, target_langs)
+            merge_language_stats(language_stats, info.get("tuvs") or [])
+            if info.get("ok"):
+                ok += 1
+            else:
+                for problem in set(info.get("problems") or []):
+                    if problem in counts:
+                        counts[problem] += 1
+            now = time.time()
+            if now - last_update > 0.8:
+                self.log(f"Compare analysis: {os.path.basename(path)} - TU {total}")
+                last_update = now
+        issues = sum(counts.values())
+        return {
+            "file": path,
+            "file_name": os.path.basename(path),
+            "size_bytes": os.path.getsize(path),
+            "total_tu": total,
+            "potentially_importable_tu": ok,
+            "problem_tu": total - ok,
+            "issues": issues,
+            **counts,
+            "language_stats": language_stats,
+        }
+
+    def comparison_file_row(self, side, key, data):
+        if not data:
+            return [side, key, "", "", "", "", "", "", "", "", "", "", "", "", ""]
+        return [
+            side,
+            key,
+            data.get("file", ""),
+            data.get("size_bytes", 0),
+            data.get("total_tu", 0),
+            data.get("potentially_importable_tu", 0),
+            data.get("problem_tu", 0),
+            data.get("issues", 0),
+            data.get("missing_source_lang", 0),
+            data.get("missing_target_lang", 0),
+            data.get("empty_source_seg", 0),
+            data.get("empty_target_seg", 0),
+            data.get("tag_only_source_seg", 0),
+            data.get("tag_only_target_seg", 0),
+            data.get("xml_parse_error", 0) + data.get("no_tuv_found", 0),
+        ]
+
+    def aggregate_comparison_metrics(self, items):
+        metrics = {
+            "files": len(items),
+            "size_bytes": 0,
+            "total_tu": 0,
+            "potentially_importable_tu": 0,
+            "problem_tu": 0,
+            "issues": 0,
+            "missing_source_lang": 0,
+            "missing_target_lang": 0,
+            "empty_source_seg": 0,
+            "empty_target_seg": 0,
+            "tag_only_source_seg": 0,
+            "tag_only_target_seg": 0,
+            "xml_parse_or_no_tuv": 0,
+        }
+        for data in items:
+            if not data:
+                continue
+            metrics["size_bytes"] += data.get("size_bytes", 0)
+            metrics["total_tu"] += data.get("total_tu", 0)
+            metrics["potentially_importable_tu"] += data.get("potentially_importable_tu", 0)
+            metrics["problem_tu"] += data.get("problem_tu", 0)
+            metrics["issues"] += data.get("issues", 0)
+            metrics["missing_source_lang"] += data.get("missing_source_lang", 0)
+            metrics["missing_target_lang"] += data.get("missing_target_lang", 0)
+            metrics["empty_source_seg"] += data.get("empty_source_seg", 0)
+            metrics["empty_target_seg"] += data.get("empty_target_seg", 0)
+            metrics["tag_only_source_seg"] += data.get("tag_only_source_seg", 0)
+            metrics["tag_only_target_seg"] += data.get("tag_only_target_seg", 0)
+            metrics["xml_parse_or_no_tuv"] += data.get("xml_parse_error", 0) + data.get("no_tuv_found", 0)
+        return metrics
+
+    def language_stats_sheet_for_compare(self, side, analyzed):
+        rows = [["side", "file", "language", "tuv_count", "tu_count", "non_empty_seg_count", "empty_seg_count", "tag_only_seg_count"]]
+        for key, data in sorted(analyzed.items()):
+            for lang, vals in sorted((data.get("language_stats") or {}).items(), key=lambda x: (-x[1]["tuv_count"], x[0])):
+                rows.append([
+                    side,
+                    key,
+                    lang,
+                    vals["tuv_count"],
+                    vals["tu_count"],
+                    vals["non_empty_seg_count"],
+                    vals["empty_seg_count"],
+                    vals["tag_only_seg_count"],
+                ])
+        return rows
+
+    def compare_worker_main(self, selected_files_a, selected_files_b, output_dir, source_langs, target_langs):
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            files_a = self.build_compare_file_map(selected_files_a)
+            files_b = self.build_compare_file_map(selected_files_b)
+            if not files_a:
+                self.queue.put(("error", "TMX A selection does not contain valid TMX files."))
+                return
+            if not files_b:
+                self.queue.put(("error", "TMX B selection does not contain valid TMX files."))
+                return
+
+            self.log(f"TMX A files: {len(files_a)}")
+            self.log(f"TMX B files: {len(files_b)}")
+            analyzed_a = {}
+            analyzed_b = {}
+            total_files = len(files_a) + len(files_b)
+            done = 0
+
+            for key, item in sorted(files_a.items(), key=lambda x: x[1]["key"].lower()):
+                if self.cancel_event.is_set():
+                    self.queue.put(("done", "Canceled."))
+                    return
+                self.queue.put(("overall", f"Compare: A {len(analyzed_a) + 1} / {len(files_a)}"))
+                self.log(f"Analyzing TMX A: {item['key']}")
+                analyzed_a[key] = self.analyze_tmx_for_comparison(item["path"], source_langs, target_langs)
+                done += 1
+                self.queue.put(("progress", done * 100 / max(1, total_files)))
+
+            for key, item in sorted(files_b.items(), key=lambda x: x[1]["key"].lower()):
+                if self.cancel_event.is_set():
+                    self.queue.put(("done", "Canceled."))
+                    return
+                self.queue.put(("overall", f"Compare: B {len(analyzed_b) + 1} / {len(files_b)}"))
+                self.log(f"Analyzing TMX B: {item['key']}")
+                analyzed_b[key] = self.analyze_tmx_for_comparison(item["path"], source_langs, target_langs)
+                done += 1
+                self.queue.put(("progress", done * 100 / max(1, total_files)))
+
+            all_keys = sorted(set(files_a) | set(files_b))
+            matched = [key for key in all_keys if key in analyzed_a and key in analyzed_b]
+            only_a = [key for key in all_keys if key in analyzed_a and key not in analyzed_b]
+            only_b = [key for key in all_keys if key in analyzed_b and key not in analyzed_a]
+
+            agg_a = self.aggregate_comparison_metrics([analyzed_a[k] for k in analyzed_a])
+            agg_b = self.aggregate_comparison_metrics([analyzed_b[k] for k in analyzed_b])
+
+            summary = [["metric", "folder_a", "folder_b", "delta_b_minus_a"]]
+            for metric in [
+                "files", "size_bytes", "total_tu", "potentially_importable_tu", "problem_tu", "issues",
+                "missing_source_lang", "missing_target_lang", "empty_source_seg", "empty_target_seg",
+                "tag_only_source_seg", "tag_only_target_seg", "xml_parse_or_no_tuv",
+            ]:
+                summary.append([metric, agg_a.get(metric, 0), agg_b.get(metric, 0), agg_b.get(metric, 0) - agg_a.get(metric, 0)])
+            summary.extend([
+                ["matched_files", len(matched), "", ""],
+                ["only_in_tmx_a", len(only_a), "", ""],
+                ["only_in_tmx_b", len(only_b), "", ""],
+                ["tmx_a_files", "; ".join(selected_files_a), "", ""],
+                ["tmx_b_files", "; ".join(selected_files_b), "", ""],
+                ["source_langs", ",".join(sorted(source_langs)), "", ""],
+                ["target_langs", ",".join(sorted(target_langs)), "", ""],
+            ])
+
+            header = [
+                "side", "file_key", "path", "size_bytes", "total_tu", "potentially_importable_tu", "problem_tu", "issues",
+                "missing_source_lang", "missing_target_lang", "empty_source_seg", "empty_target_seg",
+                "tag_only_source_seg", "tag_only_target_seg", "xml_parse_or_no_tuv",
+            ]
+            files_sheet = [header]
+            for key in sorted(analyzed_a):
+                files_sheet.append(self.comparison_file_row("A", key, analyzed_a[key]))
+            for key in sorted(analyzed_b):
+                files_sheet.append(self.comparison_file_row("B", key, analyzed_b[key]))
+
+            matched_sheet = [[
+                "file_key", "a_total_tu", "b_total_tu", "delta_total_tu",
+                "a_importable", "b_importable", "delta_importable",
+                "a_problem_tu", "b_problem_tu", "delta_problem_tu",
+                "a_issues", "b_issues", "delta_issues",
+            ]]
+            for key in matched:
+                a = analyzed_a[key]
+                b = analyzed_b[key]
+                matched_sheet.append([
+                    key,
+                    a.get("total_tu", 0), b.get("total_tu", 0), b.get("total_tu", 0) - a.get("total_tu", 0),
+                    a.get("potentially_importable_tu", 0), b.get("potentially_importable_tu", 0), b.get("potentially_importable_tu", 0) - a.get("potentially_importable_tu", 0),
+                    a.get("problem_tu", 0), b.get("problem_tu", 0), b.get("problem_tu", 0) - a.get("problem_tu", 0),
+                    a.get("issues", 0), b.get("issues", 0), b.get("issues", 0) - a.get("issues", 0),
+                ])
+
+            only_a_sheet = [["file_key", "path", "total_tu", "potentially_importable_tu", "problem_tu", "issues"]]
+            for key in only_a:
+                d = analyzed_a[key]
+                only_a_sheet.append([key, d.get("file", ""), d.get("total_tu", 0), d.get("potentially_importable_tu", 0), d.get("problem_tu", 0), d.get("issues", 0)])
+            only_b_sheet = [["file_key", "path", "total_tu", "potentially_importable_tu", "problem_tu", "issues"]]
+            for key in only_b:
+                d = analyzed_b[key]
+                only_b_sheet.append([key, d.get("file", ""), d.get("total_tu", 0), d.get("potentially_importable_tu", 0), d.get("problem_tu", 0), d.get("issues", 0)])
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            report_path = os.path.join(output_dir, f"tost_compare_tmx_{timestamp}.xlsx")
+            write_xlsx(report_path, [
+                ("Summary", summary),
+                ("Files", files_sheet),
+                ("Matched files", matched_sheet),
+                ("Only in A", only_a_sheet),
+                ("Only in B", only_b_sheet),
+                ("Language stats A", self.language_stats_sheet_for_compare("A", analyzed_a)),
+                ("Language stats B", self.language_stats_sheet_for_compare("B", analyzed_b)),
+            ])
+            self.last_report_path = report_path
+            self.log(f"Compare XLSX report: {report_path}")
+            self.log("Compare summary:")
+            self.log(f"  TMX A: files {agg_a['files']}, TU {agg_a['total_tu']}, importable {agg_a['potentially_importable_tu']}, problems {agg_a['problem_tu']}, issues {agg_a['issues']}")
+            self.log(f"  TMX B: files {agg_b['files']}, TU {agg_b['total_tu']}, importable {agg_b['potentially_importable_tu']}, problems {agg_b['problem_tu']}, issues {agg_b['issues']}")
+            self.log(f"  Matched files: {len(matched)} | Only in A: {len(only_a)} | Only in B: {len(only_b)}")
+            self.set_result_summary_text(
+                "Compare: "
+                f"A files {agg_a['files']} / TU {agg_a['total_tu']} / importable {agg_a['potentially_importable_tu']} / problems {agg_a['problem_tu']} | "
+                f"B files {agg_b['files']} / TU {agg_b['total_tu']} / importable {agg_b['potentially_importable_tu']} / problems {agg_b['problem_tu']} | "
+                f"Matched {len(matched)} / Only A {len(only_a)} / Only B {len(only_b)}"
+            )
+            self.queue.put(("progress", 100))
+            self.queue.put(("done", "Finished."))
+        except Exception as exc:
+            self.queue.put(("error", str(exc)))
+
     def optimize_file(self, path, output_dir, source_langs, target_langs):
         base = sanitize_filename(os.path.splitext(os.path.basename(path))[0])
         dry_run = bool(self.opt_dry_run.get())
@@ -2009,6 +3273,14 @@ class TmxSplitterApp:
         remove_noisy = bool(self.opt_remove_noisy.get())
         remove_one_char_punct = bool(self.opt_remove_one_char_punct.get())
         noisy_set = parse_noisy_set(self.opt_noisy_segments.get())
+        noisy_match_mode = self.opt_noisy_match_mode.get() if self.opt_noisy_match_mode.get() in ("Both source and target", "Either source or target") else "Both source and target"
+        warn_min_length = bool(self.opt_warn_min_length.get())
+        try:
+            min_text_length = int(self.opt_min_text_length.get().strip())
+            if min_text_length <= 0:
+                min_text_length = 0
+        except ValueError:
+            min_text_length = 0
         report_inline_tag_mismatch = bool(self.opt_report_inline_tag_mismatch.get())
         strip_mismatched_inline_tags = bool(self.opt_strip_mismatched_inline_tags.get())
         strip_all_inline_tags = bool(self.opt_strip_all_inline_tags.get())
@@ -2195,15 +3467,18 @@ class TmxSplitterApp:
             source_text, target_text = get_source_target_texts(tuvs, source_langs, target_langs)
 
             # Short/noisy segment checks are only applied to otherwise valid source-target pairs.
-            noisy_pair = bool(source_text and target_text and is_noisy_segment(source_text, noisy_set) and is_noisy_segment(target_text, noisy_set))
+            noisy_pair = bool(source_text and target_text and noisy_list_pair_matches(source_text, target_text, noisy_set, noisy_match_mode))
             one_char_pair = bool(source_text and target_text and is_one_char_or_punctuation(source_text) and is_one_char_or_punctuation(target_text))
-            if warn_noisy and (noisy_pair or one_char_pair):
+            short_length_pair = bool(warn_min_length and is_short_length_pair(source_text, target_text, min_text_length))
+            if warn_noisy and (noisy_pair or one_char_pair or short_length_pair):
                 noisy_warnings += 1
                 reason = []
                 if noisy_pair:
                     reason.append("noisy_segment_list_match")
                 if one_char_pair:
                     reason.append("one_character_or_punctuation_pair")
+                if short_length_pair:
+                    reason.append("short_length_pair")
                 noisy_rows.append([
                     total,
                     tu_start_line,
