@@ -1,15 +1,31 @@
-﻿__pycache__/
-*.pyc
-*.pyo
-*.pyd
+﻿# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
 
+# Virtual environments
+.venv/
+venv/
+env/
+
+# PyInstaller build output
 build/
 dist/
 *.spec
 
+# TOST local runtime files
 output/
-*.tmx
+tost_settings.json
+
+# Generated reports and local test files
 *.xlsx
 *.log
 
-tost_settings.json
+# Local TMX data files
+*.tmx
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
